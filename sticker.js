@@ -1,232 +1,208 @@
-const { downloadMediaMessage } = require("@whiskeysockets/baileys");
-const { exec } = require("child_process");
-const fs = require("fs");
-const path = require("path");
-const settings = require("../settings");
-const webp = require("node-webpmux");
-const crypto = require("crypto");
+const fs = require('fs')
+const path = require('path')
+const crypto = require('crypto')
+const { spawn } = require('child_process')
+const { fileTypeFromBuffer } = require('file-type')
+const webp = require('node-webpmux')
+const fetch = require('node-fetch')
+const ffmpeg = require('fluent-ffmpeg')
+const { exec } = require('child_process')
+const { promisify } = require('util')
+const execAsync = promisify(exec)
+const { writeExifImg } = require('./exif')
 
-// Official Configuration
-const OFFICIAL_JID = "0029VbB7Tsa6WaKgDuGsnO1u@newsletter";
-const CHANNEL_LINK = `https://whatsapp.com/channel/${
-  OFFICIAL_JID.split("@")[0]
-}`;
+const tmp = path.join(__dirname, '../tmp')
 
-async function stickerCommand(sock, chatId, message) {
-  // Official message to quote in reply
-  const officialMessageToQuote = message;
-
-  // Determine target message for media
-  let targetMessage = message;
-
-  // Handle official replies
-  if (message.message?.extendedTextMessage?.contextInfo?.quotedMessage) {
-    const quotedInfo = message.message.extendedTextMessage.contextInfo;
-    targetMessage = {
-      key: {
-        remoteJid: chatId,
-        id: quotedInfo.stanzaId,
-        participant: quotedInfo.participant,
-      },
-      message: quotedInfo.quotedMessage,
-    };
-  }
-
-  const mediaMessage =
-    targetMessage.message?.imageMessage ||
-    targetMessage.message?.videoMessage ||
-    targetMessage.message?.documentMessage;
-
-  if (!mediaMessage) {
-    await sock.sendMessage(
-      chatId,
-      {
-        text: "👑 *Decree:*\n\nYou must present an image or video to create a sticker!\n\n*Reply to media or include with .sticker command*",
-        contextInfo: {
-          forwardedNewsletterMessageInfo: {
-            newsletterJid: OFFICIAL_JID,
-            newsletterName: "Queen Marvel MD",
-          },
-        },
-        templateButtons: [
-          {
-            urlButton: {
-              displayText: "📡 Sticker Guide",
-              url: CHANNEL_LINK,
-            },
-          },
-        ],
-      },
-      { quoted: officialMessageToQuote }
-    );
-    return;
-  }
-
-  try {
-    // Announce official sticker creation
-    await sock.sendMessage(chatId, {
-      text: "🎨 *Official Announcement:*\n\nThe official artists are crafting your sticker...",
-      templateButtons: [
-        {
-          quickReplyButton: {
-            displayText: "🕒 Be Patient",
-            id: "!waiting",
-          },
-        },
-      ],
-    });
-
-    const mediaBuffer = await downloadMediaMessage(
-      targetMessage,
-      "buffer",
-      {},
-      {
-        logger: undefined,
-        reuploadRequest: sock.updateMediaMessage,
-      }
-    );
-
-    if (!mediaBuffer) {
-      await sock.sendMessage(chatId, {
-        text: "💢 *Mishap:*\n\nThe sticker could not be acquired!\n\n*Try again when the artists are available*",
-        contextInfo: {
-          forwardedNewsletterMessageInfo: {
-            newsletterJid: OFFICIAL_JID,
-            newsletterName: "Queen Marvel MD",
-          },
-        },
-        templateButtons: [
-          {
-            urlButton: {
-              displayText: "📡 Report Issue",
-              url: CHANNEL_LINK,
-            },
-          },
-        ],
-      });
-      return;
-    }
-
-    // Prepare official art studio
-    const officialStudio = path.join(process.cwd(), "tmp");
-    if (!fs.existsSync(officialStudio)) {
-      fs.mkdirSync(officialStudio, { recursive: true });
-    }
-
-    // Create official file paths
-    const officialInput = path.join(
-      officialStudio,
-      `official_art_${Date.now()}`
-    );
-    const officialOutput = path.join(
-      officialStudio,
-      `official_sticker_${Date.now()}.webp`
-    );
-
-    // Preserve the official media
-    fs.writeFileSync(officialInput, mediaBuffer);
-
-    // Determine if media is animated
-    const isAnimated =
-      mediaMessage.mimetype?.includes("gif") ||
-      mediaMessage.mimetype?.includes("video") ||
-      mediaMessage.seconds > 0;
-
-    // Official conversion command (optimized for perfect 512x512 sticker size)
-    const officialConversion = isAnimated
-      ? `ffmpeg -i "${officialInput}" -vf "scale=512:512:force_original_aspect_ratio=increase:flags=lanczos,crop=512:512,fps=15" -c:v libwebp -quality 90 -compression_level 6 -loop 0 -preset default -an -vsync 0 "${officialOutput}"`
-      : `ffmpeg -i "${officialInput}" -vf "scale=512:512:force_original_aspect_ratio=increase:flags=lanczos,crop=512:512" -c:v libwebp -quality 90 -compression_level 6 -preset default -an -vsync 0 "${officialOutput}"`;
-
-    await new Promise((resolve, reject) => {
-      exec(officialConversion, (error) => {
-        if (error) {
-          console.error("Official Artist Error:", error);
-          reject(error);
-        } else resolve();
-      });
-    });
-
-    // Prepare official metadata
-    const webpBuffer = fs.readFileSync(officialOutput);
-    const img = new webp.Image();
-    await img.load(webpBuffer);
-
-    // Create official seal (metadata)
-    const officialSeal = {
-      "sticker-pack-id": crypto.randomBytes(32).toString("hex"),
-      "sticker-pack-name": settings.packname || "Queen Marvel MD",
-      "sticker-pack-publisher": "officially made",
-      emojis: ["👑", "⚜️", "🎨"],
-    };
-
-    // Craft official exif
-    const exifAttr = Buffer.from([
-      0x49, 0x49, 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00, 0x01, 0x00, 0x41, 0x57,
-      0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x16, 0x00, 0x00, 0x00,
-    ]);
-    const jsonBuffer = Buffer.from(JSON.stringify(officialSeal), "utf8");
-    const exif = Buffer.concat([exifAttr, jsonBuffer]);
-    exif.writeUIntLE(jsonBuffer.length, 14, 4);
-
-    // Apply royal seal
-    img.exif = exif;
-    const finalBuffer = await img.save(null);
-
-    // Present the official sticker (without channel button as requested)
-    await sock.sendMessage(
-      chatId,
-      {
-        sticker: finalBuffer,
-        contextInfo: {
-          forwardedNewsletterMessageInfo: {
-            newsletterJid: OFFICIAL_JID,
-            newsletterName: "Queen Marvel MD",
-          },
-        },
-      },
-      { quoted: officialMessageToQuote }
-    );
-
-    // Clean the official studio
+/**
+ * Image to Sticker
+ * @param {Buffer} img Image Buffer
+ * @param {String} url Image URL
+ */
+function sticker2(img, url) {
+  return new Promise(async (resolve, reject) => {
     try {
-      fs.unlinkSync(officialInput);
-      fs.unlinkSync(officialOutput);
-    } catch (err) {
-      console.error("Official Cleanup Error:", err);
+      if (url) {
+        let res = await fetch(url)
+        if (res.status !== 200) throw await res.text()
+        img = await res.buffer()
+      }
+      let inp = path.join(tmp, +new Date + '.jpeg')
+      await fs.promises.writeFile(inp, img)
+      let ff = spawn('ffmpeg', [
+        '-y',
+        '-i', inp,
+        '-vf', 'scale=512:512:flags=lanczos:force_original_aspect_ratio=decrease,format=rgba,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=#00000000,setsar=1',
+        '-f', 'png',
+        '-'
+      ])
+      ff.on('error', reject)
+      ff.on('close', async () => {
+        await fs.promises.unlink(inp)
+      })
+      let bufs = []
+      const [_spawnprocess, ..._spawnargs] = [...(module.exports.support.gm ? ['gm'] : module.exports.magick ? ['magick'] : []), 'convert', 'png:-', 'webp:-']
+      let im = spawn(_spawnprocess, _spawnargs)
+      im.on('error', e => conn.reply(m.chat, util.format(e), m))
+      im.stdout.on('data', chunk => bufs.push(chunk))
+      ff.stdout.pipe(im.stdin)
+      im.on('exit', () => {
+        resolve(Buffer.concat(bufs))
+      })
+    } catch (e) {
+      reject(e)
     }
-
-    // Send follow-up with channel button
-    await sock.sendMessage(chatId, {
-      text: "✨ *Official Decree:*\n\nYour sticker has been crafted with official perfection!",
-      templateButtons: [
-        {
-          urlButton: {
-            displayText: "📡 More Sticker Packs",
-            url: CHANNEL_LINK,
-          },
-        },
-      ],
-    });
-  } catch (error) {
-    console.error("Official Sticker Error:", error);
-    await sock.sendMessage(chatId, {
-      text: "💢 *Official Disaster:*\n\nThe official sticker creation has failed!\n\n*Queen Marvel demands you try again later*",
-      contextInfo: {
-        forwardedNewsletterMessageInfo: {
-          newsletterJid: OFFICIAL_JID,
-          newsletterName: "Queen Marvel MD",
-        },
-      },
-      templateButtons: [
-        {
-          urlButton: {
-            displayText: "📡 Get Help",
-            url: CHANNEL_LINK,
-          },
-        },
-      ],
-    });
-  }
+  })
 }
 
-module.exports = stickerCommand;
+/**
+ * Image/Video to Sticker
+ * @param {Buffer} img Image/Video Buffer
+ * @param {String} url Image/Video URL
+ * @param {String} packname EXIF Packname
+ * @param {String} author EXIF Author
+ */
+async function sticker3(img, url, packname, author) {
+  url = url ? url : await uploadFile(img)
+  let res = await fetch('https://api.xteam.xyz/sticker/wm?' + new URLSearchParams(Object.entries({
+    url,
+    packname,
+    author
+  })))
+  return await res.buffer()
+}
+
+/**
+ * Image to Sticker
+ * @param {Buffer} img Image/Video Buffer
+ * @param {String} url Image/Video URL
+ */
+async function sticker4(img, url) {
+  if (url) {
+    let res = await fetch(url)
+    if (res.status !== 200) throw await res.text()
+    img = await res.buffer()
+  }
+  return await ffmpeg(img, [
+    '-vf', 'scale=512:512:flags=lanczos:force_original_aspect_ratio=decrease,format=rgba,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=#00000000,setsar=1'
+  ], 'jpeg', 'webp')
+}
+
+async function sticker5(img, url, packname, author, categories = [''], extra = {}) {
+  const { Sticker } = await import('wa-sticker-formatter')
+  const stickerMetadata = {
+    type: 'default',
+    pack: packname,
+    author,
+    categories,
+    ...extra
+  }
+  return (new Sticker(img ? img : url, stickerMetadata)).toBuffer()
+}
+
+/**
+ * Convert using fluent-ffmpeg
+ * @param {string} img 
+ * @param {string} url 
+ */
+function sticker6(img, url) {
+  return new Promise(async (resolve, reject) => {
+    if (url) {
+      let res = await fetch(url)
+      if (res.status !== 200) throw await res.text()
+      img = await res.buffer()
+    }
+    const type = await fileTypeFromBuffer(img) || {
+      mime: 'application/octet-stream',
+      ext: 'bin'
+    }
+    if (type.ext == 'bin') reject(img)
+    const tmp = path.join(__dirname, `../tmp/${+ new Date()}.${type.ext}`)
+    const out = path.join(tmp + '.webp')
+    await fs.promises.writeFile(tmp, img)
+    // https://github.com/MhankBarBar/termux-wabot/blob/main/index.js#L313#L368
+    let Fffmpeg = /video/i.test(type.mime) ? fluent_ffmpeg(tmp).inputFormat(type.ext) : fluent_ffmpeg(tmp).input(tmp)
+    Fffmpeg
+      .on('error', function (err) {
+        console.error(err)
+        fs.promises.unlink(tmp)
+        reject(img)
+      })
+      .on('end', async function () {
+        fs.promises.unlink(tmp)
+        resolve(await fs.promises.readFile(out))
+      })
+      .addOutputOptions([
+        `-vcodec`, `libwebp`, `-vf`,
+        `scale='min(320,iw)':min'(320,ih)':force_original_aspect_ratio=decrease,fps=15, pad=320:320:-1:-1:color=white@0.0, split [a][b]; [a] palettegen=reserve_transparent=on:transparency_color=ffffff [p]; [b][p] paletteuse`
+      ])
+      .toFormat('webp')
+      .save(out)
+  })
+}
+/**
+ * Add WhatsApp JSON Exif Metadata
+ * Taken from https://github.com/pedroslopez/whatsapp-web.js/pull/527/files
+ * @param {Buffer} webpSticker 
+ * @param {String} packname 
+ * @param {String} author 
+ * @param {String} categories 
+ * @param {Object} extra 
+ * @returns 
+ */
+async function addExif(webpSticker, packname, author, categories = [''], extra = {}) {
+  const img = new webp.Image();
+  const stickerPackId = crypto.randomBytes(32).toString('hex');
+  const json = { 'sticker-pack-id': stickerPackId, 'sticker-pack-name': packname, 'sticker-pack-publisher': author, 'emojis': categories, ...extra };
+  let exifAttr = Buffer.from([0x49, 0x49, 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00, 0x01, 0x00, 0x41, 0x57, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x16, 0x00, 0x00, 0x00]);
+  let jsonBuffer = Buffer.from(JSON.stringify(json), 'utf8');
+  let exif = Buffer.concat([exifAttr, jsonBuffer]);
+  exif.writeUIntLE(jsonBuffer.length, 14, 4);
+  await img.load(webpSticker)
+  img.exif = exif
+  return await img.save(null)
+}
+
+/**
+ * Convert media to WebP and add metadata
+ * @param {Buffer} inputBuffer Image Buffer
+ * @param {String} url Image URL
+ * @param {String} packname EXIF Packname
+ * @param {String} author EXIF Author
+ */
+async function sticker(isImage, url, packname, author) {
+    try {
+        const response = await fetch(url);
+        const buffer = await response.buffer();
+        
+        // Create sticker with metadata
+        const stickerBuffer = await writeExifImg(buffer, {
+            packname: packname || 'WhatsApp Bot',
+            author: author || '@bot'
+        });
+        
+        return stickerBuffer;
+    } catch (error) {
+        console.error('Error in sticker creation:', error);
+        return null;
+    }
+}
+
+const support = {
+  ffmpeg: true,
+  ffprobe: true,
+  ffmpegWebp: true,
+  convert: true,
+  magick: false,
+  gm: false,
+  find: false
+}
+
+module.exports = {
+  sticker,
+  sticker2,
+  sticker3,
+  sticker4,
+  sticker6,
+  addExif,
+  support
+}
